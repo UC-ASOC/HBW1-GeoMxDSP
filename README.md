@@ -20,9 +20,15 @@ This workshop is for **beginners** and no prior knowledge of Linux/Docker/R is r
 ASOC cannot directly provide materials due to agreements and participants should download the following package before the workshop on their machine. 
 
 1. Human Brain GeoMx DSP data
-2. Human Brain OME.TIFF file
+  - If you can use git, ```git clone https://github.com/UC-ASOC/HBW1-GeoMxDSP.git```
+  - Or, download the repo by clicking ```Code``` (green button at the top right corner) and ```Download ZIP```
+3. [Human Brain OME.TIFF file](https://ASOC.ucalgary.ca/HBW/download/hu_brain_004b.ome.tiff)
 
 ## Objectives
+By the end of this workshop, participants will be able to understand the GeoMx DSP data structure, generate diagnostic plots for QC, carry out statistical testing between user-defined groups, and visualize the segments on a tissue image. Participants can preview a set of codes and outputs from the Workshop below. 
+
+1. [Nanostring GeoMx DSP Data Analysis](https://ASOC.ucalgary.ca/HBW/HBW1-GeoMxDSP_Part1.html)
+2. [Nanostring GeoMx DSP Data Visualization](https://ASOC.ucalgary.ca/HBW/HBW1-GeoMxDSP_Part2.html)
 
 ## Workshop Schedule 
 | **Time**	 | **Activity**                                             | **Lead** |
