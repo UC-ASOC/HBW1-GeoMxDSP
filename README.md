@@ -1,5 +1,5 @@
 # Hands-on Bioinformatics Workshop (HBW), Series I
-ASOC (Applied Spatial Omics Centre) is hosting a **Spatial Transcriptomics Data Analysis Workshop** focusing on **Nanostring GeoMx DSP** data analysis and visualization to profile the whole-transcriptome of your regions of interest at the University of Calgary.
+ASOC (Applied Spatial Omics Centre) is hosting a **Spatial Transcriptomics Data Analysis Workshop** focusing on **Nanostring GeoMx DSP** data analysis and visualization to profile the whole transcriptome at the University of Calgary.
 
 ## Workshop Information 
 The workshop will include lectures and hands-on tutorials to cover data (pre)processing, normalization, and visualization of the Nanostring GeoMx DSP data. Nanostring offers a set of R packages that enables comprehensive QC/analysis of the GeoMx DSP data and the following two vignettes will be covered in the Workshop. In addition, Nanostring generously provided the Spatial Organ Atlas and the Human Brain dataset will be used to generate results. The goal is to provide **comprehensive analysis schemes** for Spatial Transcriptomics data analysis, specifically Nanostring GeoMx DSP data, and other bioinformatic tasks.
