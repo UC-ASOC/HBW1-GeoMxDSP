@@ -17,7 +17,7 @@ This workshop is for **beginners** and no prior knowledge of Linux/Docker/R is r
 2. [Docker](https://docs.docker.com/get-docker/)
 
 ## Materials - Download the following files before the Workshop
-Nanostring generously agrees that ASOC can directly distribute and host a subset of Human Brain GeoMx DSP data for this Workshop and participants should download the following **two files before** the workshop on their machine. 
+Nanostring generously agrees that ASOC can directly distribute and host a subset of Human Brain GeoMx DSP data for this Workshop and participants should download the following **two items before the workshop** on their machine. 
 
 1. Human Brain GeoMx DSP data
   - If you can use git, ```git clone https://github.com/UC-ASOC/HBW1-GeoMxDSP.git```
