@@ -1,0 +1,641 @@
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# Hands-on Bioinformatics Workshop
+# Spatial Transcriptomics Data Analysis - Nanostring GeoMx DSP
+# Data: https://nanostring.com/products/geomx-digital-spatial-profiler/spatial-organ-atlas/human-brain/
+# Reference: https://www.bioconductor.org/packages/release/workflows/vignettes/GeoMxWorkflows/inst/doc/GeomxTools_RNA-NGS_Analysis.html
+#
+# Modified by Heewon Seo (Heewon.Seo@UCalgary.ca)
+# Updated on July 27, 2024
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# Directory settings
+baseDir <- "/home/rstudio/analysis/"
+outDir <- file.path(baseDir, "Results")
+dir.create(outDir, showWarnings = FALSE)
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# Load user defined functions
+source("/home/rstudio/R/userDefinedFunctions.R")
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# Load libraries
+library(NanoStringNCTools)
+library(GeoMxWorkflows)
+library(GeomxTools)
+library(stringr)
+library(ggplot2)
+library(ggrepel)
+library(ggsankey)
+library(reshape2)
+library(scales)
+library(dplyr)
+library(yaml)
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# Load a set of threshold values
+paramFile <- file.path(baseDir, "Documents", "YAML", "SOA_Brain.yaml")
+config <- yaml::yaml.load_file(paramFile)
+
+segmentQcParams <- list(
+        minSegmentReads = config$QCparam$SegmentQC$minSegmentReads,
+        percentTrimmed = config$QCparam$SegmentQC$percentTrimmed,
+        percentStitched = config$QCparam$SegmentQC$percentStitched,
+        percentAligned = config$QCparam$SegmentQC$percentAligned,
+        percentSaturation = config$QCparam$SegmentQC$percentSaturation,
+        minNegativeCount = config$QCparam$SegmentQC$minNegativeCount,
+        maxNTCCount = config$QCparam$SegmentQC$maxNTCCount,
+        minNuclei = config$QCparam$SegmentQC$minNuclei,
+        minArea = config$QCparam$SegmentQC$minArea
+)
+
+probeQcParams <- list(
+        minProbeRatio = config$QCparam$ProbeQC$minProbeRatio,
+        percentFailGrubbs = config$QCparam$ProbeQC$percentFailGrubbs
+)
+
+loqCutoff <- config$QCparam$LOQ$loqCutoff
+loqMin <- config$QCparam$LOQ$loqMin
+
+geneDetectionRateThre <- config$QCparam$DetectionRate$geneDetectionRateThre
+geneDetectionRateBins <- unlist(config$QCparam$DerectionRateBins$geneDetectionRate)
+geneDetectionRateBinLabels <- config$QCparam$DerectionRateBins$geneDetectionRateLabel
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 1 -- * --
+# Load DCC/PKC file into a GeoMx object, e.g., geomxSet.RDS
+dccFiles  <- dir(file.path(baseDir, "DCC"), pattern = ".dcc$", full.names = TRUE, recursive = TRUE)
+pkcFile   <- dir(file.path(baseDir, "PKC"), pattern = ".pkc$", full.names = TRUE, recursive = TRUE)
+annotFile <- dir(file.path(baseDir, "Annot"), pattern = ".xlsx$", full.names = TRUE, recursive = TRUE)
+
+initSet <- readNanoStringGeoMxSet(dccFiles = dccFiles,
+                           pkcFiles = pkcFile,
+                           phenoDataFile = annotFile,
+                           phenoDataSheet = "Annotation",
+                           phenoDataDccColName = "FileName",
+                           protocolDataColNames = c("ROI", "AOI"),
+                           experimentDataColNames = c("Panel")
+)
+saveRDS(initSet, file.path(outDir, "01_GeoMxSet_Init.RDS"))
+dim(initSet)
+head(assayData(initSet)$exprs[, c(1:2)])
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 2 -- * --
+# Shift all zero values to one to transform in downstream analysis
+gSet <- shiftCountsOne(initSet, useDALogic = TRUE)
+head(assayData(gSet)$exprs[, c(1:2)])
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 3 -- * --
+# Quality check at the segment/sample level
+gSet <- setSegmentQCFlags(gSet, qcCutoffs = segmentQcParams)
+qcMat <- sData(gSet)
+
+pdf(file.path(outDir, "03_Segment_QC.pdf"))
+histQC(qcMat, "Trimmed (%)", "Segment", "Slide", segmentQcParams$percentTrimmed, cols = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"))
+histQC(qcMat, "Stitched (%)", "Segment", "Slide", segmentQcParams$percentStitched, cols = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"))
+histQC(qcMat, "Aligned (%)", "Segment", "Slide", segmentQcParams$percentAligned, cols = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"))
+histQC(qcMat, "Saturated (%)", "Segment", "Slide", segmentQcParams$percentSaturation, cols = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"))
+histQC(qcMat, "area", "Segment", "Slide", segmentQcParams$minArea, "log10", "AOI Area (log10)", cols = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"))
+histQC(qcMat, "nuclei", "Segment", "Slide", segmentQcParams$minNuclei, "log10", "AOI nuclei count", cols = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"))
+dev.off()
+
+segmentQcResults <- protocolData(gSet)[["QCFlags"]]
+flagColumns <- colnames(segmentQcResults)
+qcSummary <- data.frame(Pass = colSums(!segmentQcResults[, flagColumns]), Warning = colSums(segmentQcResults[, flagColumns]))
+segmentQcResults$QCStatus <- apply(segmentQcResults, 1L, function(x) {
+        ifelse(sum(x) == 0L, "PASS", "WARNING")
+})
+qcSummary["TOTAL FLAGS", ] <- c(sum(segmentQcResults[, "QCStatus"] == "PASS"), sum(segmentQcResults[, "QCStatus"] == "WARNING"))
+qcSummary[, "TOTAL"] <- apply(qcSummary, 1, sum)
+qcSummary
+
+gSet <- gSet[, segmentQcResults$QCStatus == "PASS"]
+dim(gSet)
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 4 -- * --
+# Check negative probes/background signal distribution
+negCol <- "NegGeoMean"
+negativeGeoMeans <- esBy(
+        negativeControlSubset(gSet),
+        GROUP = "Module",
+        FUN = function(x) {
+                assayDataApply(x, MARGIN = 2, FUN = ngeoMean, elt = "exprs")
+        }
+)
+protocolData(gSet)[[negCol]] <- negativeGeoMeans
+pData(gSet)[, negCol] <- sData(gSet)[[negCol]]
+
+backgrounMat <- sData(gSet)
+backgrounMat <- backgrounMat[, c("NegGeoMean", "Segment", "Slide")]
+
+pdf(file.path(outDir, "04_Negative_probes.pdf"))
+histQC(backgrounMat, "NegGeoMean", "Segment", "Slide", 2, "log10", "GeoMean(negative probes)", cols = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"))
+dev.off()
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 5 -- * --
+# Quality check at the probe level
+gSet <- setBioProbeQCFlags(gSet, qcCutoffs = probeQcParams, removeLocalOutliers = TRUE)
+probeQcResults <- fData(gSet)[["QCFlags"]]
+
+qcDf <- data.frame(
+        Passed = sum(rowSums(probeQcResults[, -1]) == 0),
+        Global = sum(probeQcResults$GlobalGrubbsOutlier),
+        Local = sum(rowSums(probeQcResults[, -2:-1]) > 0 & !probeQcResults$GlobalGrubbsOutlier),
+        TOTAL = nrow(probeQcResults)
+)
+qcDf
+
+probeQcPassed <- subset(
+        gSet,
+        fData(gSet)[["QCFlags"]][, c("LowProbeRatio")] == FALSE &
+                fData(gSet)[["QCFlags"]][, c("GlobalGrubbsOutlier")] == FALSE
+)
+gSet <- probeQcPassed
+dim(gSet)
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 6 -- * --
+# Aggregate multi-probe and generate a gene expression profile
+newSet <- aggregateCounts(gSet)
+newSet <- subset(newSet, fData(newSet)$TargetName != "NegProbe-WTX")
+dim(newSet)
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 7 -- * --
+# (1) Check the AOI area and the number of nuclei
+lowLvqcDf <- data.frame(
+        Slide = pData(newSet)$Slide,
+        Sample = pData(newSet)$Sample,
+        Segment = pData(newSet)$Segment,
+        Area = pData(newSet)$area,
+        Nuclei = pData(newSet)$nuclei
+)
+
+scatterPlot <- ggplot(data = lowLvqcDf, aes(x = Area, y = Nuclei, color = Segment)) +
+        geom_point() +
+        scale_color_manual(values = c("magenta", "gold", "cyan", "indianred2", "chartreuse1")) +
+        labs(
+                title = "",
+                x = "Area", 
+                y = "#Nuclei"
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 0, vjust = 0, hjust = 0.5),
+                text = element_text(size = 12)
+        ) + 
+        scale_x_continuous(trans = "log10") + 
+        scale_y_continuous(trans = "log10")
+
+dodge <- position_dodge(width = 0.5)
+violin1 <- ggplot(data = lowLvqcDf, aes(x = Segment, y = Area, fill = Segment)) +
+        geom_violin(position = dodge, size = 0) +
+        geom_boxplot(width = 0.1, position = dodge, fill="white") +
+        scale_fill_manual(values = c("magenta", "gold", "cyan", "indianred2", "chartreuse1")) +
+        facet_grid( ~ Slide) +
+        labs(
+                title = "",
+                x = "", 
+                y = "Area"
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0),
+                legend.position = "none", 
+                text = element_text(size = 12)
+        ) + 
+        scale_y_continuous(trans = "log10")
+
+violin2 <- ggplot(data = lowLvqcDf, aes(x = Segment, y = Nuclei, fill = Segment)) +
+        geom_violin(position = dodge, size = 0) +
+        geom_boxplot(width = 0.1, position = dodge, fill="white") +
+        scale_fill_manual(values = c("magenta", "gold", "cyan", "indianred2", "chartreuse1")) +
+        facet_grid( ~ Slide) +
+        labs(
+                title = "",
+                x = "", 
+                y = "#Nuclei"
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 0),
+                legend.position = "none", 
+                text = element_text(size = 12)
+        ) + 
+        scale_y_continuous(trans = "log10")
+
+pdf(file.path(outDir, "07_1_Low_level_QC.pdf"))
+print(scatterPlot)
+print(violin1)
+print(violin2)
+dev.off()
+
+# (2) Determine the limit of quantification (LOQ) per segment where the LOQ is calculated based on the distribution of negative control probes and is intended to approximate the quantifiable limit of gene expression per segment
+loqDf <- data.frame(row.names = colnames(newSet))
+module <- gsub(".pkc", "", annotation(gSet))
+varNames <- paste0(c("NegGeoMean_", "NegGeoSD_"), module)
+if (all(varNames[1:2] %in% colnames(pData(newSet)))) {
+        loqDf[, module] <- pData(newSet)[, varNames[1]] * (pData(newSet)[, varNames[2]]^loqCutoff)
+}
+
+statDf <- data.frame(
+        Slide = pData(newSet)$Slide,
+        Sample = pData(newSet)$Sample,
+        Library = protocolData(newSet)$AOI,
+        Segment = pData(newSet)$Segment,
+        LOQ = loqDf[, 1]
+)
+statShort <- dcast(statDf, Sample ~ Segment, fun.aggregate = mean, value.var = "LOQ")
+perSample <- statShort[, c(2:ncol(statShort))]
+rownames(perSample) <- as.character(statShort[, 1])
+statShort <- data.frame(
+        Sample = rownames(perSample),
+        LOQmean = as.matrix(apply(perSample, 1, mean, na.rm = TRUE))
+)
+statShort <- statShort[order(statShort$LOQmean), ]
+statDf$Sample <- factor(statDf$Sample, levels = statShort$Sample)
+
+
+violin3 <- ggplot(data = statDf, aes(x = Segment, y = log10(LOQ), fill = Segment)) +
+        geom_violin(position = dodge, size = 0) +
+        geom_boxplot(width = 0.1, position = dodge, fill="white") +
+        scale_fill_manual(values = c("magenta", "gold", "cyan", "indianred2", "chartreuse1")) +
+        labs(
+                title = "",
+                subtitle = "",
+                x = "Segment", 
+                y = "LOQ, log10"
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 0, vjust = 0, hjust = 0.5),
+                legend.position = "none", 
+                text = element_text(size = 12)
+        ) + 
+        geom_hline(aes(yintercept = log10(loqMin)), lty=2, col="grey50")
+
+violin4 <- ggplot(data = statDf, aes(x = Segment, y = log10(LOQ), fill = Segment)) +
+        geom_violin(position = dodge, size = 0) +
+        geom_boxplot(width = 0.1, position = dodge, fill="white") +
+        scale_fill_manual(values = c("magenta", "gold", "cyan", "indianred2", "chartreuse1")) +
+        facet_grid(~Slide) + 
+        labs(
+                title = "",
+                subtitle = "",
+                x = "Segment", 
+                y = "LOQ, log10"
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 90, vjust = 0, hjust = 0.5),
+                legend.position = "none", 
+                text = element_text(size = 12)
+        ) + 
+        geom_hline(aes(yintercept = log10(loqMin)), lty=2, col="grey50")
+ 
+pdf(file.path(outDir, "07_2_LOQ_Distribution.pdf"))
+print(violin3)
+print(violin4)
+dev.off()
+
+scatterPlot2 <- ggplot(data=statDf, aes(x = Sample, y = log10(LOQ), group = Segment)) +
+        geom_line(aes(color=Segment), lwd=0.5) +
+        geom_point(aes(color=Segment)) +
+        scale_color_manual(values = c("magenta", "gold", "cyan", "indianred2", "chartreuse1")) +
+        labs(
+                title = "",
+                x = "", 
+                y = "LOQ, log10"
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 90, vjust = 0, hjust = 0),
+                text = element_text(size = 12)
+        ) + 
+        geom_hline(aes(yintercept = log10(loqMin)), lty=2, col="grey50")
+
+pdf(file.path(outDir, "07_2_LOQ_perSample.pdf"), width=15)
+print(scatterPlot2)
+dev.off()
+
+loqDf[loqDf < loqMin] <- loqMin
+pData(newSet)$LOQ <- loqDf
+
+loqMat <- t(esApply(newSet, MARGIN = 1, FUN = function(x) {
+        x > LOQ[, module]
+}))
+loqMat <- loqMat[fData(newSet)$TargetName, ] # Ordering
+
+# (3) Filter out segments with exceptionally low signal that have a small fraction of panel genes detected above the LOQ relative to the other segments in the study
+pData(newSet)$GenesDetected <- colSums(loqMat, na.rm = TRUE)
+pData(newSet)$GeneDetectionRate <- pData(newSet)$GenesDetected / nrow(newSet)
+pData(newSet)$DetectionThreshold <- cut(pData(newSet)$GeneDetectionRate, breaks = geneDetectionRateBins, labels = geneDetectionRateBinLabels)
+rateMat <- pData(newSet)
+
+barplot <- ggplot(rateMat, aes(x = DetectionThreshold)) +
+        geom_bar(aes(fill = Segment)) +
+        geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5) +
+        scale_fill_manual(values = c("magenta", "gold", "cyan", "indianred2", "chartreuse1")) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 90, vjust = 0, hjust = 0),
+                text = element_text(size = 12)
+        ) + 
+        scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+        labs(x = "Gene Detection Rate",
+                y = "Number of Segments/Samples",
+                fill = "Segment"
+        ) + 
+        facet_grid(as.formula(~ Slide))
+
+pdf(file.path(outDir, "07_3_DetectedGenes_summary.pdf"))
+print(barplot)
+dev.off()
+
+statDf <- data.frame(
+        Sample = protocolData(newSet)$AOI, # pData(newSet)$Sample,
+        Segment = pData(newSet)$Segment,
+        GenesDetected = colSums(loqMat, na.rm = TRUE),
+        Nuclei = pData(newSet)$nuclei
+)
+
+pdf(file.path(outDir, "07_3_DetectedGenes.pdf"))
+for (segment in c("Full", "GFAP", "Iba1", "Neuron", "Neuropil")) {
+        tmpDf <- statDf[which(statDf$Segment == segment),]
+        tmpDf <- tmpDf[order(tmpDf$GenesDetected, decreasing = F),]
+        tmpDf$Sample <- factor(tmpDf$Sample, levels=tmpDf$Sample)
+        
+        if (segment == "Full") { segmentCol = "magenta" }
+        else if (segment == "GFAP") { segmentCol = "gold" }
+        else if (segment == "Iba1") { segmentCol = "cyan" }
+        else if (segment == "Neuron") { segmentCol = "indianred2" }
+        else if (segment == "Neuropil") { segmentCol = "chartreuse1" }
+        
+        
+        barplot <- ggplot(tmpDf, aes(x = Sample, y = GenesDetected, fill = Segment)) +
+                geom_bar(stat = "identity") +
+                scale_fill_manual(values = segmentCol) +
+                theme_minimal() +
+                labs(
+                        title = "",
+                        x = "Sample"
+                ) +
+                coord_flip() +
+                theme_bw() +
+                theme(
+                        axis.line = element_line(colour = "black"),
+                        panel.grid.major = element_blank(),
+                        panel.grid.minor = element_blank(),
+                        panel.border = element_blank(),
+                        panel.background = element_blank(),
+                        axis.text.x = element_text(angle = 0, vjust = 0, hjust = 0),
+                        legend.position = "none"
+                )
+        print(barplot)
+}
+dev.off()
+
+newSet <- newSet[, pData(newSet)$GeneDetectionRate >= geneDetectionRateThre]
+dim(newSet)
+
+# (4) Filter out genes with low coverage
+loqMat <- loqMat[, colnames(newSet)]
+fData(newSet)$DetectedSegments <- rowSums(loqMat, na.rm = TRUE)
+fData(newSet)$DetectionRate <- fData(newSet)$DetectedSegments / nrow(pData(newSet))
+
+geneDetectionRateDf <- data.frame(
+        Gene = rownames(newSet),
+        Number = fData(newSet)$DetectedSegments,
+        DetectionRate = percent(fData(newSet)$DetectionRate)
+)
+geneDetectionRateDf <- geneDetectionRateDf[order(geneDetectionRateDf$Number, geneDetectionRateDf$DetectionRate, geneDetectionRateDf$Gene),]
+
+finalSet <- newSet[fData(newSet)$DetectionRate >= geneDetectionRateThre, ]
+dim(finalSet)
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 8 -- * --
+# Normalization
+finalSet <- normalize(finalSet, norm_method = "quant", desiredQuantile = .75, toElt = "q_norm")
+saveRDS(finalSet, file.path(outDir, "08_GeoMxSet_AnalysisReady.RDS"))
+
+annot <- pData(finalSet)
+
+rawMat <- assayData(finalSet)$exprs
+colnames(rawMat) <- annot$Library
+
+normMat <- assayData(finalSet)$q_norm
+colnames(normMat) <- annot$Library
+
+pdf(file.path(outDir, "08_Normalization_perSample.pdf"), width=12, height=10)
+par(oma=c(12,0,0,0))
+boxplot(log10(rawMat+1), pch = 20, xlab = "", ylab = "Raw count, log10", las = 3)
+boxplot(log10(normMat+1), pch = 20, xlab = "", ylab = "Upper-quartile norm, log10", las = 3)
+dev.off()
+
+rawDf <- melt(rawMat)
+colnames(rawDf) <- c("Gene", "Sample", "Expression")
+rawDf$Segment <- rep(annot$Segment, each=nrow(rawMat))
+
+normDf <- melt(normMat)
+colnames(normDf) <- c("Gene", "Sample", "Expression")
+normDf$Segment <- rep(annot$Segment, each=nrow(rawMat))
+
+pdf(file.path(outDir, "08_Normalization_perSegment.pdf"))
+boxplot(log10(Expression+1) ~ Segment, data = rawDf, col = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"), pch = 20, ylab = "Raw count, log10", xlab = "Segment")
+boxplot(log10(Expression+1) ~ Segment, data = normDf, col = c("magenta", "gold", "cyan", "indianred2", "chartreuse1"), pch = 20, ylab = "Upper-quartile norm, log10", xlab = "Segment")
+dev.off()
+
+# Study design after QC
+countDf <- pData(finalSet) %>% make_long(Region, Segment, Patient)
+studyDesign <- ggplot(countDf, aes(x = x, next_x = next_x, node = node, next_node = next_node, fill = factor(node), label = node)) +
+        geom_sankey(flow.alpha = .6, node.color = "gray30") +
+        geom_sankey_label(size = 3, color = "black", fill = "white") +
+        scale_fill_viridis_d(option = "A", alpha = 0.95) +
+        theme_sankey(base_size = 18) +
+        labs(
+                title = "Study Design",
+                x = NULL, 
+                y = NULL
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_blank(),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 0, vjust = 0, hjust = 0.5),
+                axis.ticks.x = element_blank(),
+                axis.text.y = element_blank(),
+                axis.ticks.y = element_blank(),
+                legend.position = "none", 
+                text = element_text(size = 12)
+        )
+
+pdf(file.path(outDir, "08_Study_design.pdf"))
+print(studyDesign)
+dev.off()
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 9 -- * --
+# Prnicipal Component Analysis
+normMat <- assayData(finalSet)$q_norm
+pcaRes <- prcomp(t(normMat), scale = TRUE)
+pcaDf <- data.frame(
+        Sample = annot$Library,
+        X = pcaRes$x[, 1],
+        Y = pcaRes$x[, 2],
+        Slide = annot$Slide,
+        Segment = annot$Segment,
+        Region = annot$Region
+)
+
+pcaPlot1 <- ggplot(data = pcaDf, aes(x = X, y = Y, color = Slide, label = Sample)) +
+        geom_point(size = 2, shape = 20) +
+        scale_color_manual(values = c("#7FC97F", "#BEAED4", "#FDC086", "#FFFF99")) +
+        labs(
+                x = paste0("PC1 (", round(summary(pcaRes)$importance[2, c(1)] * 100, 1), "%)"),
+                y = paste0("PC2 (", round(summary(pcaRes)$importance[2, c(2)] * 100, 1), "%)")
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 0, vjust = 0, hjust = 0.5),
+                text = element_text(size = 12)
+        )
+
+pcaPlot2 <- ggplot(data = pcaDf, aes(x = X, y = Y, color = Segment, label = Sample)) +
+                geom_point(size = 2, shape = 20) +
+                scale_color_manual(values = c("magenta", "gold", "cyan", "indianred2", "chartreuse1")) +
+                labs(
+                        x = paste0("PC1 (", round(summary(pcaRes)$importance[2, c(1)] * 100, 1), "%)"),
+                        y = paste0("PC2 (", round(summary(pcaRes)$importance[2, c(2)] * 100, 1), "%)")
+                ) +
+                theme_bw() +
+                theme(
+                        axis.line = element_line(colour = "black"),
+                        panel.grid.major = element_blank(),
+                        panel.grid.minor = element_blank(),
+                        panel.border = element_blank(),
+                        panel.background = element_blank(),
+                        axis.text.x = element_text(angle = 0, vjust = 0, hjust = 0.5),
+                        text = element_text(size = 12)
+                )
+
+pcaPlot3 <- ggplot(data = pcaDf, aes(x = X, y = Y, color = Region, label = Sample)) +
+        geom_point(size = 2, shape = 20) +
+        scale_color_manual(values = c("#E41A1C", "#377EB8")) +
+        labs(
+                x = paste0("PC1 (", round(summary(pcaRes)$importance[2, c(1)] * 100, 1), "%)"),
+                y = paste0("PC2 (", round(summary(pcaRes)$importance[2, c(2)] * 100, 1), "%)")
+        ) +
+        theme_bw() +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank(),
+                axis.text.x = element_text(angle = 0, vjust = 0, hjust = 0.5),
+                text = element_text(size = 12)
+        )
+
+pdf(file.path(outDir, "09_PCA.pdf"))
+print(pcaPlot1)
+print(pcaPlot2)
+print(pcaPlot3)
+dev.off()
+
+##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+# -- * -- Step 10 -- * --
+# Differential Expression Analysis
+annot <- pData(finalSet)
+exprMat <- assayData(finalSet)$q_norm
+
+iba1Idx <- which(annot$Segment == "Iba1")
+cortexIdx <- which(annot$Region == "Cortex")
+hippoIdx <- which(annot$Region == "Hippocampus")
+
+statDf <- data.frame(
+        Gene = fData(finalSet)$TargetName,
+        Log2FC = apply(exprMat, 1, log2fc, idx1 = intersect(iba1Idx, cortexIdx), idx2 = intersect(iba1Idx, hippoIdx)),
+        P = apply(exprMat, 1, ttest, idx1 = intersect(iba1Idx, cortexIdx), idx2 = intersect(iba1Idx, hippoIdx))
+)
+statDf$FDR <- p.adjust(statDf$P, method="fdr")
+statDf$DEG <- "Not"
+statDf$DEG[statDf$Log2FC > 1 & statDf$P < 0.05] <- "Up"
+statDf$DEG[statDf$Log2FC < -1 & statDf$P < 0.05] <- "Down"
+statDf$DEG <- factor(statDf$DEG, levels=c("Up", "Not", "Down"))
+
+statDf$Label <- statDf$Gene
+statDf$Label[statDf$DEG == "Not"] <- NA
+
+volcanoPlot <- ggplot(data = statDf, aes(x = Log2FC, y = -log10(P), col = DEG, label = Label)) +
+        geom_point(cex = 3) +
+        theme_minimal() +
+        geom_text_repel(max.overlaps = 10) +
+        geom_vline(xintercept = c(-1, 1), col = "grey40", lty = 2) +
+        geom_hline(yintercept = -log10(0.05), col = "grey40", lty = 2) +
+        scale_color_manual(
+                name = "DEG", values = c("#AE3C32", "#F9FBCB", "#46639C"),
+                labels = c("Up-reg. in Cortex", "Not significant", "Down-reg. in Cortex")
+        ) +
+        labs(
+                title = "Cortex vs. Hippocampus in Iba1",
+                subtitle = paste0("n(Cortex) = ", length(intersect(iba1Idx, cortexIdx)), "; n(Hippocampus) = ", length(intersect(iba1Idx, hippoIdx))),
+                x = "Log2-Fold change", 
+                y = "-Log10(nominal P)"
+        ) +
+        theme(
+                axis.line = element_line(colour = "black"),
+                panel.grid.major = element_blank(),
+                panel.grid.minor = element_blank(),
+                panel.border = element_blank(),
+                panel.background = element_blank()
+        )
+pdf(file.path(outDir, "10_VolcanoPlot.pdf"))
+print(volcanoPlot)
+dev.off()
+
+q("no")
