@@ -515,7 +515,7 @@ dev.off()
 
 ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
 # -- * -- Step 9 -- * --
-# Prnicipal Component Analysis
+# Principal Component Analysis
 normMat <- assayData(finalSet)$q_norm
 pcaRes <- prcomp(t(normMat), scale = TRUE)
 pcaDf <- data.frame(
